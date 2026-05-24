@@ -27,11 +27,12 @@ def stats():
     timeline_sorted = sorted(timeline.items())
 
     return jsonify({
-        "total_packets":  len(packets),
-        "protocols":      dict(protocol_counts),
-        "top_ips":        top_ips,
-        "timeline":       timeline_sorted,
-        "alerts":         alerts,
+        "total_packets": len(packets),
+        "protocols":     dict(protocol_counts),
+        "top_ips":       top_ips,
+        "timeline":      timeline_sorted,
+        "alerts":        alerts,
+        "packets":       packets[:50],   # send latest 50 for the table
     })
 
 if __name__ == "__main__":
