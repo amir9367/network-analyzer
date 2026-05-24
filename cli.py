@@ -1,5 +1,4 @@
 import click
-from capture.sniffer import start_capture
 from storage.database import init_db, query_recent_alerts
 from dashboard.app import app
 
@@ -9,11 +8,12 @@ def cli():
     pass
 
 @cli.command()
-@click.option("--interface", "-i", default="eth0", help="Network interface to capture on")
-@cli.command()
-def capture(interface):
+@click.option("--interface", "-i", default=None, help="Network interface to capture on")
+@click.option("--count", "-c", default=0, help="Number of packets to capture (0 = unlimited)")
+def capture(interface, count):
     """Start capturing packets."""
-    start_capture(interface=interface)
+    from capture.sniffer import start_capture
+    start_capture(interface=interface, count=count)
 
 @cli.command()
 def dashboard():
