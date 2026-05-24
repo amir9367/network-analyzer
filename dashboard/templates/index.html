@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Network Analyzer Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: monospace; background: #0d1117; color: #c9d1d9; padding: 2rem; }
+    h1   { color: #58a6ff; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    canvas { background: #161b22; border-radius: 8px; padding: 1rem; }
+    #alerts { background: #161b22; border-radius: 8px; padding: 1rem; margin-top: 1.5rem; }
+    .alert-item { border-left: 3px solid #f85149; padding: 0.4rem 0.8rem; margin: 0.5rem 0; }
+    .alert-item span { color: #8b949e; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <h1>🛡 Network Traffic Analyzer</h1>
+  <p id="summary">Loading...</p>
+
+  <div class="grid">
+    <canvas id="timelineChart"></canvas>
+    <canvas id="protocolChart"></canvas>
+  </div>
+
+  <div id="alerts"><h3>⚠️ Recent Alerts</h3><div id="alertList"></div></div>
+
+  <script src="/static/charts.js"></script>
+</body>
+</html>
