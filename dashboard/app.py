@@ -1,39 +1,54 @@
+"""
+Flask dashboard — serves the HTML UI and a small REST API.
+"""
+from __future__ import annotations
 from flask import Flask, jsonify, render_template
-from storage.database import query_recent_packets, query_recent_alerts
-from collections import Counter
+from storage.database import (
+    query_protocol_counts,
+    query_traffic_timeline,
+    query_top_ips,
+    query_recent_alerts,
+    query_recent_packets,
+)
 
 app = Flask(__name__)
+app.config["JSON_SORT_KEYS"] = False
+
+
+# ── HTML ───────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
-@app.route("/api/stats")
-def stats():
-    packets = query_recent_packets(500)
-    alerts  = query_recent_alerts(20)
 
-    # Protocol breakdown
-    protocol_counts = Counter(p["protocol"] for p in packets)
+# ── API ────────────────────────────────────────────────────────────────────────
 
-    # Top source IPs
-    top_ips = Counter(p["src_ip"] for p in packets).most_common(5)
+@app.route("/api/protocols")
+def api_protocols():
+    rows = query_protocol_counts()
+    return jsonify([{"protocol": r["protocol"], "count": r["cnt"]} for r in rows])
 
-    # Traffic over time (group by minute)
-    timeline = Counter()
-    for p in packets:
-        minute = p["timestamp"][:16]   # "2024-01-01T12:34"
-        timeline[minute] += p["size"]
-    timeline_sorted = sorted(timeline.items())
 
-    return jsonify({
-        "total_packets": len(packets),
-        "protocols":     dict(protocol_counts),
-        "top_ips":       top_ips,
-        "timeline":      timeline_sorted,
-        "alerts":        alerts,
-        "packets":       packets[:50],   # send latest 50 for the table
-    })
+@app.route("/api/timeline")
+def api_timeline():
+    rows = query_traffic_timeline(minutes=10)
+    return jsonify([{"minute": r["minute"], "count": r["cnt"]} for r in rows])
 
-if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+
+@app.route("/api/top-ips")
+def api_top_ips():
+    rows = query_top_ips(10)
+    return jsonify([{"ip": r["src_ip"], "count": r["cnt"]} for r in rows])
+
+
+@app.route("/api/alerts")
+def api_alerts():
+    rows = query_recent_alerts(20)
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/packets")
+def api_packets():
+    rows = query_recent_packets(50)
+    return jsonify([dict(r) for r in rows])

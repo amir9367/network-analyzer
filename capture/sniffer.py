@@ -1,53 +1,89 @@
-from scapy.all import sniff, IP, TCP, UDP, conf
-from datetime import datetime
-from storage.database import init_db, insert_packet
-from analysis.detector import analyze
+"""
+Packet capture using Scapy.
+Auto-detects the active non-loopback interface when none is specified.
+"""
+from __future__ import annotations
+import sys
 
-def packet_callback(packet):
-    if IP not in packet:
-        return  # Skip non-IP traffic (ARP, etc.)
-
-    data = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "src_ip":    packet[IP].src,
-        "dst_ip":    packet[IP].dst,
-        "protocol":  packet[IP].proto,
-        "size":      len(packet),
-        "src_port":  None,
-        "dst_port":  None,
-    }
-
-    if TCP in packet:
-        data["src_port"] = packet[TCP].sport
-        data["dst_port"] = packet[TCP].dport
-        data["protocol"] = "TCP"
-    elif UDP in packet:
-        data["src_port"] = packet[UDP].sport
-        data["dst_port"] = packet[UDP].dport
-        data["protocol"] = "UDP"
-
-    insert_packet(data)
-    analyze(data)
-    print(f"[{data['timestamp']}] {data['protocol']} {data['src_ip']}:{data['src_port']} → {data['dst_ip']}:{data['dst_port']} ({data['size']} bytes)")
+from analysis.parser import parse_packet
+from analysis import detector
+from storage.database import init_db, insert_packet, insert_alert
 
 
-def start_capture(interface=None, count=0, filter_str="ip"):
-    """
-    Start sniffing packets.
-    interface=None auto-selects your active network interface.
-    count=0 means capture indefinitely.
-    """
-    init_db()
+def _auto_interface() -> str:
+    """Return the first non-loopback interface that has an IP."""
+    try:
+        from scapy.all import conf, get_if_list, get_if_addr
+    except ImportError:
+        print("[!] Scapy is not installed. Run: pip install scapy", file=sys.stderr)
+        sys.exit(1)
 
-    if interface is None:
-        interface = conf.iface
-        print(f"[*] Auto-selected interface: {interface}")
+    for iface in get_if_list():
+        if iface in ("lo", "lo0"):
+            continue
+        try:
+            addr = get_if_addr(iface)
+            if addr and addr != "0.0.0.0":
+                return iface
+        except Exception:
+            continue
 
-    print(f"[*] Starting capture on {interface}...")
-    sniff(
-        iface=interface,
-        prn=packet_callback,
-        count=count,
-        filter=filter_str,
-        store=False
+    # fallback to scapy's default
+    return conf.iface
+
+
+def _handle(pkt) -> None:
+    data = parse_packet(pkt)
+    if data is None:
+        return
+
+    insert_packet(
+        timestamp=data["timestamp"],
+        src_ip=data["src_ip"],
+        dst_ip=data["dst_ip"],
+        protocol=data["protocol"],
+        length=data["length"],
     )
+
+    for alert in detector.check(data):
+        insert_alert(**alert)
+        print(
+            f"[ALERT] {alert['timestamp']}  {alert['alert_type']:<15} "
+            f"{alert['src_ip']:<18} {alert['detail']}"
+        )
+
+
+def start_capture(interface: str | None = None, count: int = 0) -> None:
+    """
+    Capture live packets on *interface* (auto-detected when None).
+    *count* = 0 means unlimited; any positive value stops after that many packets.
+    """
+    try:
+        from scapy.all import sniff
+    except ImportError:
+        print("[!] Scapy is not installed. Run: pip install scapy", file=sys.stderr)
+        sys.exit(1)
+
+    init_db()
+    iface = interface or _auto_interface()
+
+    print(f"[*] Capturing on interface: {iface}")
+    print(f"[*] Packet limit: {'unlimited' if count == 0 else count}")
+    print("[*] Press Ctrl+C to stop.\n")
+
+    try:
+        sniff(
+            iface=iface,
+            prn=_handle,
+            count=count or 0,
+            store=False,    # don't accumulate packets in memory
+        )
+    except KeyboardInterrupt:
+        print("\n[*] Capture stopped.")
+    except PermissionError:
+        print(
+            "[!] Permission denied. Run with sudo (Linux/macOS) "
+            "or as Administrator (Windows).",
+            file=sys.stderr,
+        )
+        sys.exit(1)

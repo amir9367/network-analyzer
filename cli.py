@@ -1,36 +1,61 @@
+"""
+NetAnalyzer CLI — capture, dashboard, and alerts.
+
+Usage:
+  python cli.py capture [--interface IF] [--count N]
+  python cli.py dashboard [--port PORT]
+  python cli.py alerts [--limit N]
+"""
+import sys
 import click
+
 from storage.database import init_db, query_recent_alerts
-from dashboard.app import app
+
 
 @click.group()
 def cli():
-    """Network Traffic Analyzer"""
-    pass
+    """🛡️ NetAnalyzer — real-time network traffic analyzer."""
+
 
 @cli.command()
-@click.option("--interface", "-i", default=None, help="Network interface to capture on")
-@click.option("--count", "-c", default=0, help="Number of packets to capture (0 = unlimited)")
+@click.option("--interface", "-i", default=None,
+              help="Network interface (auto-detected when omitted).")
+@click.option("--count", "-c", default=0, show_default=True,
+              help="Packets to capture; 0 = unlimited.")
 def capture(interface, count):
-    """Start capturing packets."""
+    """Capture live packets and store them to the database."""
     from capture.sniffer import start_capture
     start_capture(interface=interface, count=count)
 
-@cli.command()
-def dashboard():
-    """Launch the web dashboard."""
-    init_db()
-    print("[*] Dashboard running at http://localhost:5000")
-    app.run(debug=False, port=5000)
 
 @cli.command()
-def alerts():
-    """Print recent alerts to terminal."""
+@click.option("--port", "-p", default=5000, show_default=True,
+              help="Port to serve the dashboard on.")
+def dashboard(port):
+    """Launch the live web dashboard."""
     init_db()
-    rows = query_recent_alerts(20)
+    from dashboard.app import app
+    click.echo(f"[*] Dashboard → http://localhost:{port}")
+    click.echo("[*] Run capture in a separate terminal to see live data.")
+    app.run(host="127.0.0.1", port=port, debug=False)
+
+
+@cli.command()
+@click.option("--limit", "-n", default=20, show_default=True,
+              help="Number of recent alerts to display.")
+def alerts(limit):
+    """Print recent anomaly alerts to the terminal."""
+    init_db()
+    rows = query_recent_alerts(limit)
     if not rows:
-        print("No alerts recorded yet.")
+        click.echo("No alerts recorded yet.")
+        return
     for r in rows:
-        print(f"[{r['timestamp']}] {r['alert_type']} | {r['src_ip']} — {r['detail']}")
+        click.echo(
+            f"[{r['timestamp']}] {r['alert_type']:<15} "
+            f"| {r['src_ip']:<18} — {r['detail']}"
+        )
+
 
 if __name__ == "__main__":
     cli()
