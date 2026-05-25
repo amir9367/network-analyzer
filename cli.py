@@ -1,61 +1,73 @@
+#!/usr/bin/env python3
 """
-NetAnalyzer CLI — capture, dashboard, and alerts.
+NetAnalyzer — CLI entry point
 
-Usage:
-  python cli.py capture [--interface IF] [--count N]
-  python cli.py dashboard [--port PORT]
-  python cli.py alerts [--limit N]
+Commands:
+  capture    Start live packet capture
+  dashboard  Launch the web dashboard
+  alerts     Print recent alerts
 """
+
+import argparse
 import sys
-import click
-
-from storage.database import init_db, query_recent_alerts
 
 
-@click.group()
-def cli():
-    """🛡️ NetAnalyzer — real-time network traffic analyzer."""
-
-
-@cli.command()
-@click.option("--interface", "-i", default=None,
-              help="Network interface (auto-detected when omitted).")
-@click.option("--count", "-c", default=0, show_default=True,
-              help="Packets to capture; 0 = unlimited.")
-def capture(interface, count):
-    """Capture live packets and store them to the database."""
+def cmd_capture(args):
+    from storage.database import init_db
     from capture.sniffer import start_capture
-    start_capture(interface=interface, count=count)
-
-
-@cli.command()
-@click.option("--port", "-p", default=5000, show_default=True,
-              help="Port to serve the dashboard on.")
-def dashboard(port):
-    """Launch the live web dashboard."""
     init_db()
+    start_capture(interface=args.interface, count=args.count)
+
+
+def cmd_dashboard(args):
+    from storage.database import init_db
     from dashboard.app import app
-    click.echo(f"[*] Dashboard → http://localhost:{port}")
-    click.echo("[*] Run capture in a separate terminal to see live data.")
-    app.run(host="127.0.0.1", port=port, debug=False)
-
-
-@cli.command()
-@click.option("--limit", "-n", default=20, show_default=True,
-              help="Number of recent alerts to display.")
-def alerts(limit):
-    """Print recent anomaly alerts to the terminal."""
     init_db()
-    rows = query_recent_alerts(limit)
+    print("  Dashboard → http://localhost:5000  (Ctrl-C to stop)")
+    app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
+
+
+def cmd_alerts(args):
+    from storage.database import init_db, query_recent_alerts
+    init_db()
+    rows = query_recent_alerts(args.limit)
     if not rows:
-        click.echo("No alerts recorded yet.")
+        print("  No alerts recorded yet.")
         return
     for r in rows:
-        click.echo(
-            f"[{r['timestamp']}] {r['alert_type']:<15} "
-            f"| {r['src_ip']:<18} — {r['detail']}"
-        )
+        print(f"[{r['timestamp']}] {r['alert_type']:<15} | "
+              f"{r['src_ip']:<18} {r['detail']}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="netanalyzer",
+        description="Real-time network traffic analyzer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # capture
+    p_cap = sub.add_parser("capture", help="Start live packet capture")
+    p_cap.add_argument("-i", "--interface", default=None,
+                       help="Network interface (default: auto-detect)")
+    p_cap.add_argument("-c", "--count", type=int, default=0,
+                       help="Packets to capture; 0 = unlimited (default: 0)")
+    p_cap.set_defaults(func=cmd_capture)
+
+    # dashboard
+    p_dash = sub.add_parser("dashboard", help="Launch the web dashboard")
+    p_dash.set_defaults(func=cmd_dashboard)
+
+    # alerts
+    p_al = sub.add_parser("alerts", help="Print recent anomaly alerts")
+    p_al.add_argument("-n", "--limit", type=int, default=20,
+                      help="Number of alerts to show (default: 20)")
+    p_al.set_defaults(func=cmd_alerts)
+
+    args = parser.parse_args()
+    args.func(args)
 
 
 if __name__ == "__main__":
-    cli()
+    main()

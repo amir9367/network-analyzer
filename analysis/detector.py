@@ -1,106 +1,86 @@
-"""
-Anomaly detection — port-scan and traffic-spike detection
-using rolling time windows per source IP.
+"""Anomaly detection: port-scan and traffic-spike, using rolling time windows."""
 
-Thread-safe: all state is protected by a single lock.
-"""
-from __future__ import annotations
 import threading
-import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
-# ── tuneable thresholds ────────────────────────────────────────────────────────
-PORT_SCAN_THRESHOLD  = 15          # unique dst ports per IP in WINDOW_SECONDS
-TRAFFIC_SPIKE_BYTES  = 5_000_000   # bytes per IP in WINDOW_SECONDS (5 MB)
+# ── Configurable thresholds ──────────────────────────────────────────────────
+PORT_SCAN_THRESHOLD  = 15          # unique dst ports per window before alert
+TRAFFIC_SPIKE_BYTES  = 5_000_000   # bytes per window before alert (5 MB)
 WINDOW_SECONDS       = 60
-CLEANUP_INTERVAL     = 120         # prune stale entries every 2 min
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 _lock = threading.Lock()
 
-# src_ip → list of (timestamp_float, dst_port)
-_port_events: dict[str, list[tuple[float, int]]] = defaultdict(list)
-# src_ip → list of (timestamp_float, byte_count)
-_byte_events:  dict[str, list[tuple[float, int]]] = defaultdict(list)
-
-_last_cleanup = time.monotonic()
+# {src_ip: {dst_port: first_seen_ts}}
+_port_map: dict[str, dict[int, datetime]] = defaultdict(dict)
+# {src_ip: (bytes_total, window_start_ts)}
+_byte_map: dict[str, tuple[int, datetime]] = {}
 
 
-def _now() -> float:
-    return time.monotonic()
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def _prune(events: dict[str, list], cutoff: float) -> None:
-    for ip in list(events):
-        events[ip] = [e for e in events[ip] if e[0] >= cutoff]
-        if not events[ip]:
-            del events[ip]
+def _evict_old(src_ip: str, now: datetime) -> None:
+    """Remove stale entries outside the rolling window (called under lock)."""
+    cutoff = (now.timestamp() - WINDOW_SECONDS)
+
+    # Evict old ports
+    ports = _port_map.get(src_ip, {})
+    stale = [p for p, ts in ports.items() if ts.timestamp() < cutoff]
+    for p in stale:
+        del ports[p]
+
+    # Evict old byte counter
+    entry = _byte_map.get(src_ip)
+    if entry and entry[1].timestamp() < cutoff:
+        del _byte_map[src_ip]
 
 
-def _maybe_cleanup() -> None:
-    global _last_cleanup
-    now = _now()
-    if now - _last_cleanup > CLEANUP_INTERVAL:
-        cutoff = now - WINDOW_SECONDS
-        _prune(_port_events, cutoff)
-        _prune(_byte_events, cutoff)
-        _last_cleanup = now
-
-
-def check(packet: dict) -> list[dict]:
+def observe(src_ip: str, dst_port: int | None,
+            length: int) -> list[dict]:
     """
-    Feed a parsed packet dict (from analysis.parser) into the detector.
-    Returns a (possibly empty) list of alert dicts with keys:
-        timestamp, alert_type, src_ip, detail
+    Update internal state for one packet.
+    Returns a (possibly empty) list of alert dicts if thresholds were crossed.
     """
-    src_ip   = packet.get("src_ip")
-    dst_port = packet.get("dst_port")
-    length   = packet.get("length", 0)
-
-    if not src_ip:
-        return []
-
-    alerts = []
-    ts     = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    now    = _now()
-    cutoff = now - WINDOW_SECONDS
+    now = alerts = None
+    fired: list[dict] = []
 
     with _lock:
-        _maybe_cleanup()
+        now = _now()
+        _evict_old(src_ip, now)
 
-        # ── byte-spike tracking ────────────────────────────────────────────
-        _byte_events[src_ip].append((now, length))
-        window_bytes = sum(
-            b for t, b in _byte_events[src_ip] if t >= cutoff
-        )
-        if window_bytes >= TRAFFIC_SPIKE_BYTES:
-            alerts.append({
-                "timestamp":  ts,
-                "alert_type": "TRAFFIC_SPIKE",
-                "src_ip":     src_ip,
-                "detail": (
-                    f"Sent {window_bytes:,} bytes in {WINDOW_SECONDS}s"
-                ),
-            })
-            # reset to avoid alert storm
-            _byte_events[src_ip].clear()
-
-        # ── port-scan tracking ────────────────────────────────────────────
+        # ── Port-scan detection ──────────────────────────────────────────────
         if dst_port is not None:
-            _port_events[src_ip].append((now, dst_port))
-            recent_ports = {
-                p for t, p in _port_events[src_ip] if t >= cutoff
-            }
-            if len(recent_ports) >= PORT_SCAN_THRESHOLD:
-                alerts.append({
-                    "timestamp":  ts,
+            ports = _port_map[src_ip]
+            if dst_port not in ports:
+                ports[dst_port] = now
+            if len(ports) >= PORT_SCAN_THRESHOLD:
+                fired.append({
                     "alert_type": "PORT_SCAN",
                     "src_ip":     src_ip,
-                    "detail": (
-                        f"Hit {len(recent_ports)} unique ports in {WINDOW_SECONDS}s"
-                    ),
+                    "detail":     f"Hit {len(ports)} unique ports in {WINDOW_SECONDS}s",
+                    "timestamp":  now.strftime("%Y-%m-%dT%H:%M:%S"),
                 })
-                _port_events[src_ip].clear()
+                _port_map[src_ip].clear()   # reset so we don't spam
 
-    return alerts
+        # ── Traffic-spike detection ──────────────────────────────────────────
+        if src_ip in _byte_map:
+            total, start = _byte_map[src_ip]
+            total += length
+            _byte_map[src_ip] = (total, start)
+        else:
+            total = length
+            _byte_map[src_ip] = (total, now)
+
+        if total >= TRAFFIC_SPIKE_BYTES:
+            fired.append({
+                "alert_type": "TRAFFIC_SPIKE",
+                "src_ip":     src_ip,
+                "detail":     f"Sent {total:,} bytes in {WINDOW_SECONDS}s",
+                "timestamp":  now.strftime("%Y-%m-%dT%H:%M:%S"),
+            })
+            del _byte_map[src_ip]           # reset so we don't spam
+
+    return fired
